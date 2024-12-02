@@ -6,6 +6,7 @@ from PIL.ImageOps import expand
 from matplotlib.pyplot import savefig, imshow, set_cmap
 import matplotlib.pyplot as plt
 import numpy as np
+import logging
 
 from numpy import linalg as LA
 from tqdm.notebook import tqdm
@@ -23,11 +24,17 @@ GPU = True
 if GPU == True:
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '5'
     print("num GPUs", torch.cuda.device_count())
     dtype = torch.cuda.FloatTensor
 else:
     dtype = torch.FloatTensor
+
+logging.basicConfig(
+    filename = 'output2024_11_30.log',
+    level = logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 torch.set_printoptions(precision=4)
 eps = np.spacing(1)
@@ -137,7 +144,13 @@ def A_NMF(V,D,W,H,beta,l_r):
         
         cost1[k+1] = betadiv(D*V, D*(W@H), beta)
         
-        
+        # 记录到日志
+        logging.info(f"Variable W: {W}")
+        logging.info(f"Variable H: {H}")
+        logging.info(f"Result (new_V): {new_V}")
+        logging.info(f"Result (R): {R}")
+        logging.info(f"Iter k : {k}")
+        logging.info(f"RSE V_last - V_now: {torch.norm(stp, 'fro')}")
         
         V_cur = W@H
         
@@ -203,6 +216,7 @@ def NMF(V,D,W,H,beta):
 import scipy.io
 
 #mat = scipy.io.loadmat('./clean_Moffet.mat')
+# mat = scipy.io.loadmat('./AT_NMF-main/CBCL/X.mat')
 mat = scipy.io.loadmat('./CBCL/X.mat')
 #mat = scipy.io.loadmat('./Moffet/V.mat')
 #mat = scipy.io.loadmat('./Synthetic/X.mat')
@@ -255,6 +269,7 @@ np.random.seed(seed=1)
 for d in range(7):
     print('Now is mask %d' %(d))
     print("===========================================")
+    # D_ls = scipy.io.loadmat('./AT_NMF-main/CBCL/mask'+str(d+1)+'.mat')['mask'].T
     D_ls = scipy.io.loadmat('./CBCL/mask'+str(d+1)+'.mat')['mask'].T
     D_ls = np_to_var(D_ls)[0].type(dtype)
     
