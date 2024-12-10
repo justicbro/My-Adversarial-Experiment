@@ -64,13 +64,10 @@ def generalized_k_contraction(X, Y, modes_X, modes_Y, k):
     返回:
         torch.Tensor: 收缩后的张量
     """
-    # 检查张量维度匹配
-    if len(modes_X) != len(modes_Y):
-        raise ValueError("模式数目必须匹配！")
 
-    dims = list(range(X.dim()))
-    X_dims = dims
-    Y_dims = [dims[-1]] + dims[:-1]
+    # dims = list(range(X.dim()))
+    # X_dims = dims
+    # Y_dims = [dims[-1]] + dims[:-1]
     # 将张量展开为矩阵
     X_unfolded_T = generalized_k_unfolding(X, modes_X, k).T  # 按第一个模式展开
     Y_unfolded = generalized_k_unfolding(Y, modes_Y, k)  # 按第一个模式展开
@@ -78,8 +75,10 @@ def generalized_k_contraction(X, Y, modes_X, modes_Y, k):
     # 对齐的模式进行矩阵乘积
     contracted = torch.matmul(X_unfolded_T, Y_unfolded)
 
+    sorted_dims_X = [X.shape[i] for i in modes_X[k+1:]]
+    sorted_dims_Y = [Y.shape[i] for i in modes_Y[k+1:]]
     # 将矩阵重新折叠回张量
-    new_shape = list(X.shape[:modes_X[0]]) + list(Y.shape[modes_Y[-1]+1:])
+    new_shape = sorted_dims_X + sorted_dims_Y
     result = fold(contracted, mode=0, shape=new_shape)
 
     return result
@@ -107,7 +106,9 @@ def contract_except_n(cores, n):
     # print("full_tensor shape", full_tensor.shape)
 
     for i in range(1, N-1):
-        full_tensor = generalized_k_contraction(full_tensor, cores[cont_seq[i]], [-1], [0])
+        dims = list(range(full_tensor.ndim))
+        new_dims = [dims[-1]] + dims[:-1]
+        full_tensor = generalized_k_contraction(full_tensor, cores[cont_seq[i]], new_dims, [0,1,2], 0)
         # print("full_tensor shape", full_tensor.shape)
 
     # 将结果转换回 PyTorch 张量
@@ -142,8 +143,9 @@ def generalized_k_unfolding(X, modes, k):
 
     # 计算新的矩阵形状
     # print("prod X_k", torch.prod(torch.tensor([X.shape[i] for i in modes[:k]])).item())
-    unfold_shape = (torch.prod(torch.tensor([X.shape[i] for i in modes[:k]])).item(),
-                    -1)
+    unfold_shape = (torch.prod(torch.tensor(permuted_X.shape[:k+1])).item(),
+                    torch.prod(torch.tensor(permuted_X.shape[k+1:])).item())
+
     
     # 将调整后的张量 reshape 成矩阵
     unfolded_X = permuted_X.reshape(unfold_shape)
@@ -159,7 +161,7 @@ def als_update_tr(X, cores, n, device):
     X_hat = contract_except_n(cores, n)
     dims = list(range(X_hat.dim()))
     new_dims = [dims[-1]] + dims[:-1]
-    X_hat_unfold = generalized_k_unfolding(X_hat, new_dims, 2)
+    X_hat_unfold = generalized_k_unfolding(X_hat, new_dims, 1)
     X_hat_unfold_T = X_hat_unfold.T
 
     # 计算新的 cores[n]
@@ -221,10 +223,11 @@ if __name__ == "__main__":
     # 输入张量和秩
     shape = lena.shape
     print("lena_shape", shape)
-    ranks = [2, 5, 6, 2]  # 注意，ranks 的长度应该是 len(shape) + 1
+    ranks = [5, 5, 3]  # 注意，ranks 的长度应该是 len(shape) + 1
+    ranks = ranks + [ranks[0]]  # 最后一个 rank 应该等于第一个 rank
 
     # TR 分解
-    tr_cores = tr_decompose(lena, ranks, max_iter=500, tol=1e-10, device="cuda")
+    tr_cores = tr_decompose(lena, ranks, max_iter=200, tol=1e-10, device="cuda")
     print("TR decomposition completed!")
     for i, core in enumerate(tr_cores):
         print(f"Core {i}: Shape {core.shape}")
