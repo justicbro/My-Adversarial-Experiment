@@ -44,9 +44,6 @@ def show_images_pillow(image1, title1, image2, title2):
     img1.show(title=title1)
     img2.show(title=title2)
 
-import torch
-import tensorly as tl
-from tensorly.base import unfold, fold
 
 # 将 Tensorly backend 设置为 PyTorch
 tl.set_backend('pytorch')
@@ -79,7 +76,8 @@ def generalized_k_contraction(X, Y, modes_X, modes_Y, k):
     sorted_dims_Y = [Y.shape[i] for i in modes_Y[k+1:]]
     # 将矩阵重新折叠回张量
     new_shape = sorted_dims_X + sorted_dims_Y
-    result = fold(contracted, mode=0, shape=new_shape)
+    # result = fold(contracted, mode=0, shape=new_shape)
+    result = contracted.reshape(new_shape)
 
     return result
 
@@ -115,10 +113,6 @@ def contract_except_n(cores, n):
     result = torch.tensor(full_tensor, dtype=torch.float32).to(cores[0].device)
 
     return result
-
-
-import torch
-import tensorly as tl
 
 def generalized_k_unfolding(X, modes, k):
     """
@@ -164,16 +158,22 @@ def als_update_tr(X, cores, n, device):
     X_hat_unfold = generalized_k_unfolding(X_hat, new_dims, 1)
     X_hat_unfold_T = X_hat_unfold.T
 
-    # 计算新的 cores[n]
-    X_unfold = unfold(X, n)
+    X_dims= list(range(X.dim()))
+    X_dims.insert(0, X_dims.pop(n))
+    # X_unfold = unfold(X, n)
+    X_unfold = generalized_k_unfolding(X, X_dims, 0)
     X_unfold = torch.tensor(X_unfold, dtype=torch.float32).to(device)
     X_unfold_T = X_unfold.T
 
-    new_core = torch.linalg.lstsq(X_hat_unfold_T, X_unfold_T).solution 
-    new_core = new_core.T
+    # new_core = torch.linalg.lstsq(X_hat_unfold_T, X_unfold_T).solution 
+    # new_core = new_core.T
+    new_core = X_unfold@torch.linalg.pinv(X_hat_unfold)
+
+    # new_core2 = X_unfold@torch.linalg.pinv(X_hat_unfold)
+    # rse_core1_core2 = torch.norm(new_core - new_core2)
 
     new_core = new_core.reshape(cores[n].shape[1], cores[n].shape[0], cores[n].shape[2])
-    permuted_new_core = new_core.permute(*[1,0,2])
+    permuted_new_core = new_core.permute(1,0,2)
     return permuted_new_core
 
 def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
@@ -218,16 +218,16 @@ if __name__ == "__main__":
     # 读取 Lena 图片
     lena = Image.open('lena.png')
     lena = np.array(lena)
-    lena = torch.tensor(lena, dtype=torch.float32)
+    lena = torch.tensor(lena/255.0, dtype=torch.float32)
 
     # 输入张量和秩
     shape = lena.shape
     print("lena_shape", shape)
-    ranks = [5, 5, 3]  # 注意，ranks 的长度应该是 len(shape) + 1
+    ranks = [4, 5, 6]  # 注意，ranks 的长度应该是 len(shape) + 1
     ranks = ranks + [ranks[0]]  # 最后一个 rank 应该等于第一个 rank
 
     # TR 分解
-    tr_cores = tr_decompose(lena, ranks, max_iter=200, tol=1e-10, device="cuda")
+    tr_cores = tr_decompose(lena, ranks, max_iter=10, tol=1e-10, device="cuda")
     print("TR decomposition completed!")
     for i, core in enumerate(tr_cores):
         print(f"Core {i}: Shape {core.shape}")
@@ -240,11 +240,11 @@ if __name__ == "__main__":
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
     plt.title('Original Lena')
-    plt.imshow(lena.cpu().numpy()/255, cmap='gray')
+    plt.imshow(lena.cpu().numpy(), cmap='gray')
     plt.show()
     plt.subplot(1, 2, 2)
     plt.title('Reconstructed Lena')
-    plt.imshow(lena_reconstructed/255, cmap='gray')
+    plt.imshow(lena_reconstructed, cmap='gray')
 
     # 保存图片到文件
     plt.savefig('lena_comparison.png')
