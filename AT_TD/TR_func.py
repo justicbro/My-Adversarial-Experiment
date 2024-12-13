@@ -175,6 +175,74 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
     
     return cores
 
+def tr_decompose2(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
+    # 确保 X 是一个正确的张量
+    X = tl.tensor(X, device=device)
+
+    shape = list(X.shape)
+    prev_loss = float('inf')
+    
+    for iteration in range(max_iter):
+        for n in range(len(shape)):
+            cores[n] = als_update_tr(X, cores, n, device)
+        
+        # 重建张量计算损失
+        X_hat = tl.tr_to_tensor(cores)
+        loss = torch.norm(X - X_hat) / torch.norm(X)
+        
+        if abs(prev_loss-loss) < tol:
+            print(f"Converged at iteration {iteration + 1}")
+            break
+
+        if iteration != 0 and iteration % dis_num == 0:
+            print(f"Iteration {iteration + 1}, TRD_Loss: {loss.item():.6f}")
+        
+        prev_loss = loss
+    
+    return cores
+
+
+def tensor_completion(X, mask, ranks, max_iter=500, tol=1e-10, device="cuda"):
+    """
+    Perform tensor completion using TR-ALS.
+    
+    Parameters:
+    X: Incomplete tensor with missing values (PyTorch tensor)
+    mask: Binary mask indicating observed entries (PyTorch tensor)
+    ranks: List of ranks for the TR decomposition
+    max_iter: Maximum number of ALS iterations
+    tol: Convergence tolerance
+    device: Device to perform computations on ("cuda" or "cpu")
+    
+    Returns:
+    Completed tensor (PyTorch tensor)
+    """
+    # Initialize TR cores
+    shape = list(X.shape)
+    cores = initialize_tr_cores(shape, ranks, device)
+    prev_loss = float('inf')
+    
+    for iteration in range(max_iter):
+        for n in range(len(shape)):
+            cores[n] = als_update_tr(X * mask, cores, n, device)
+        
+        # Reconstruct the tensor from TR cores
+        X_hat = tl.tr_to_tensor(cores)
+        
+        # Compute the loss only on observed entries
+        loss = torch.norm((X - X_hat) * mask) / torch.norm(X * mask)
+        
+        if abs(prev_loss - loss) < tol:
+            print(f"Converged at iteration {iteration + 1}")
+            break
+        
+        prev_loss = loss
+        
+        if iteration % 10 == 0:
+            print(f"Iteration {iteration + 1}, Loss: {loss.item()}")
+    
+    return X_hat
+
 def reconstruct_tr(cores):
     """
     根据 TR 核心张量重构张量

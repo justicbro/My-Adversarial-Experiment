@@ -1,0 +1,8 @@
+2024-12-13 17:02:45,135 - Norm2 (Our Algorithm): 66.96100616455078
+2024-12-13 17:02:45,135 - Norm2 (Comparison Algorithm): 9.85036849975586
+2024-12-13 17:02:45,204 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.9568031..0.98221475].
+2024-12-13 17:02:45,206 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.8292506..1.8285493].
+2024-12-13 17:02:45,207 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.526869..1.4902953].
+2024-12-13 17:02:45,210 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.63245577..0.6462964].
+2024-12-13 17:02:45,212 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.5697107..1.588505].
+2024-12-13 17:02:45,214 - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-0.12864454..1.091408].
