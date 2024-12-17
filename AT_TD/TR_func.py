@@ -1,4 +1,5 @@
 import torch
+import torch.autograd as autograd
 import tensorly as tl
 from tensorly.tenalg import mode_dot
 from tensorly import unfold, fold
@@ -87,7 +88,7 @@ def contract_except_n(cores, n):
         # print("full_tensor shape", full_tensor.shape)
 
     # 将结果转换回 PyTorch 张量
-    result = torch.tensor(full_tensor, dtype=torch.float32).to(cores[0].device)
+    result = torch.tensor(full_tensor, requires_grad=True, dtype=torch.float32).to(cores[0].device)
 
     return result
 
@@ -127,22 +128,28 @@ def generalized_k_unfolding(X, modes, k):
 
 def als_update_tr(X, cores, n, device):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, device=device)
+    X = tl.tensor(X, requires_grad=True, device=device)
+
     # 计算除 cores[n] 之外的张量积
     X_hat = contract_except_n(cores, n)
+
+    # # 检查 contract_except_n 是否保持了梯度路径
+    # print(f"X_hat requires_grad (n={n}):", X_hat.requires_grad)
+
     dims = list(range(X_hat.dim()))
     new_dims = [dims[-1]] + dims[:-1]
     X_hat_unfold = generalized_k_unfolding(X_hat, new_dims, 1)
-    X_hat_unfold_T = X_hat_unfold.T
+    # X_hat_unfold_T = X_hat_unfold.T
 
     X_dims= list(range(X.dim()))
     new_X_dims = [X_dims[n]] + X_dims[n+1:] + X_dims[:n]
     X_unfold = generalized_k_unfolding(X, new_X_dims, 0)
-    X_unfold = torch.tensor(X_unfold, dtype=torch.float32).to(device)
-    X_unfold_T = X_unfold.T
+    X_unfold = torch.tensor(X_unfold, requires_grad=True, dtype=torch.float32).to(device)
+    # X_unfold_T = X_unfold.T
 
 
     new_core = X_unfold@X_hat_unfold.T@torch.linalg.pinv(X_hat_unfold@X_hat_unfold.T)
+    # new_core = X_unfold @ X_hat_unfold.T @ torch.pinverse(X_hat_unfold @ X_hat_unfold.T)
 
     new_core = new_core.reshape(cores[n].shape[1], cores[n].shape[0], cores[n].shape[2])
     permuted_new_core = new_core.permute(1,0,2)
@@ -150,7 +157,7 @@ def als_update_tr(X, cores, n, device):
 
 def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, device=device)
+    X = tl.tensor(X, requires_grad=True, device=device)
 
     shape = list(X.shape)
     cores = initialize_tr_cores(shape, ranks, device)
@@ -177,7 +184,8 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
 
 def tr_decompose2(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, device=device)
+    X = tl.tensor(X, requires_grad=True, device=device)
+    # print("X + E requires_grad:", X.requires_grad)
 
     shape = list(X.shape)
     prev_loss = float('inf')
