@@ -10,12 +10,13 @@ from datetime import datetime
 import logging
 import os
 import math
+import NMF_func as mynmf
 
 
 # 定义一个布尔变量来控制日志记录
-log_enabled = False
-imshow_enabled = False
-compare_method_enabled = False
+log_enabled = True
+imshow_enabled = True
+compare_method_enabled = True
 
 # 创建日志文件夹
 if log_enabled:
@@ -55,7 +56,7 @@ def calculate_psnr(img1, img2):
 def display_images(original_image, images, titles, rows, cols, figsize=(20, 10), save_path=None):
     fig, axes = plt.subplots(rows, cols, figsize=figsize)
     for i, ax in enumerate(axes.flat):
-        ax.imshow(images[i])
+        ax.imshow(images[i], cmap='gray')
         psnr = calculate_psnr(original_image, images[i])
         ax.set_title(f"{titles[i]}\nPSNR: {psnr:.2f} dB")
         ax.axis('off')
@@ -63,29 +64,40 @@ def display_images(original_image, images, titles, rows, cols, figsize=(20, 10),
         plt.savefig(save_path)
     plt.show()
 
-def objective_function_ATTR(X, G_list, E, iner_num_steps = 100, inner_tol = 1e-10):
+def display_line_graphs(loss_dict, figsize=(10, 5), save_path=None):
+    plt.figure(figsize=figsize)
+    for label, loss_values in loss_dict.items():
+        plt.plot(loss_values, label=label)
+    plt.xlabel('Step')
+    plt.ylabel('Loss (sqrt)')
+    plt.title('Loss over Steps')
+    plt.legend()
+    plt.grid(True)
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+def objective_function_ATNMF(X, rank, E, iner_num_steps = 100, inner_tol = 1e-10, inner_dis_num = 100, device='cuda'):
     """
     Compute the objective function ||X - TN([G^(k)])||_F^2.
     X: Original tensor (PyTorch tensor)
     G_list: List of factor tensors in tensor train format
     E: Perturbation tensor (PyTorch tensor)
     """
+    lambda2 = 5
+
     X_tube = X + E
 
-    tr_cores = tr.tr_decompose2(X_tube, G_list, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device="cuda")
+    W, H = mynmf.nmf(X_tube, rank, iner_num_steps, inner_tol, inner_dis_num, device=device)
 
-    # 确保 tr_cores 启用了梯度追踪
-    for core in tr_cores:
-        core.requires_grad_(True)
+    V_reconstructed = torch.mm(W, H)
 
-    TN_G = tl.tr_to_tensor(tr_cores)  # Reconstruct tensor from tensor train
-    # # 在计算损失之前检查 TN_G 的状态
-    # print("TN_G requires_grad:", TN_G.requires_grad)
-    # print("X requires_grad:", X.requires_grad)
-    # print("E requires_grad:", E.requires_grad)
-    return -torch.norm(X - TN_G) ** 2, TN_G
+    # 计算多个 X_tube 的核范数
+    nuclear_norm_X_tube = torch.norm(X_tube, p='nuc')
+    
+    return -torch.norm(X - V_reconstructed) ** 2 - lambda2 * nuclear_norm_X_tube, V_reconstructed
 
-def objective_function_ATR(X, G_list, E, inner_num_steps, inner_tol):
+def objective_function_ANMF(X, rank, E, iner_num_steps = 100, inner_tol = 1e-10, inner_dis_num = 100, device='cuda'):
     """
     Compute the comparison objective function.
     X: Original tensor (PyTorch tensor)
@@ -94,60 +106,17 @@ def objective_function_ATR(X, G_list, E, inner_num_steps, inner_tol):
     inner_num_steps: Number of inner optimization steps
     inner_tol: Tolerance for inner optimization
     """
-    # Example: Use a different decomposition method or a different loss function
     EC = E.clone().detach()
-    tr_cores = tr.tr_decompose2(X+EC, G_list, max_iter=inner_num_steps, tol=inner_tol, device="cuda")
-    TN_G = tl.tr_to_tensor(tr_cores)  # Reconstruct tensor from tensor train
+    X_tube = X + EC
 
-    loss_values = []
+    W, H = mynmf.nmf(X_tube, rank, iner_num_steps, inner_tol, inner_dis_num, device=device)
 
-    optimizer = torch.optim.Adam([E], lr=config.lr)
-    return -torch.norm(X+E - TN_G) ** 2, TN_G  # Example: Minimize the norm instead of maximizing
-
-
-def optimize_perturbation_simplifed(X, G_list, config: OptimizationConfig):
-    # Initialize perturbation tensor \mathcal{E}
-    E = torch.randn_like(X, requires_grad=True, device='cuda')
-    # Apply the constraint ||E||_F^2 <= epsilon
-    if torch.norm(E) ** 2 > config.epsilon:
-        E.data = config.epsilon * E / torch.norm(E)
-
-    for step in range(config.outer_num_steps):
-        tr_cores = tr.tr_decompose2(X+E, G_list, max_iter=inner_num_steps, tol=inner_tol, device="cuda")
-        TN_G = tl.tr_to_tensor(tr_cores)  # Reconstruct tensor from tensor train
-
-        E_old = E.clone().detach()
-
-        n = X.dim() - 1
-        X_dims= list(range(X.dim()))
-        new_X_dims = [X_dims[n]] + X_dims[n+1:] + X_dims[:n]
-        X_unfold = tr.generalized_k_unfolding(X, new_X_dims, 0)
-        X_unfold = torch.tensor(X_unfold, requires_grad=True, dtype=torch.float32).to('cuda')
-
-        # 计算除 cores[n] 之外的张量积
-        X_hat = tr.contract_except_n(G_list, n)
-        dims = list(range(X_hat.dim()))
-        new_dims = [dims[-1]] + dims[:-1]
-        Gr_unfold = tr.generalized_k_unfolding(X_hat, new_dims, 1)
-
-        # G_unfold = tr.generalized_k_unfolding(G_list[n], [1, 0, 2], 0)
-        Gr_inv_times_Gr = torch.linalg.pinv(Gr_unfold) @ Gr_unfold
-        E_unfold = X_unfold @ Gr_inv_times_Gr.T @ torch.linalg.pinv(Gr_inv_times_Gr @ Gr_inv_times_Gr.T)
-
-        E_folded = E_unfold.reshape(*[X.shape[dim] for dim in new_X_dims])
-        E = E_folded.permute(*[new_X_dims.index(i) for i in range(len(new_X_dims))])
-
-        rse_E = torch.norm(E - E_old)
-        print(f"Step {step}, RSE_E: {rse_E}")
+    V_reconstructed = torch.mm(W, H)
+    
+    return -torch.norm(X + E - V_reconstructed) ** 2, V_reconstructed
 
 
-        # if step % config.outer_dis_num == 0:
-        #     print(f"Step {step}, Loss: {loss.item()}")
-
-
-    return E, TN_G, rse_E
-
-def optimize_perturbation(X, G_list, config: OptimizationConfig):
+def optimize_perturbation(X, rank, config: OptimizationConfig):
     """
     Optimize perturbation tensor \mathcal{E} using gradient descent.
     X: Original tensor (PyTorch tensor)
@@ -171,45 +140,45 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
 
         E_old = E.clone().detach()
 
-        for G in G_list:
-            G.requires_grad_(True)
         X.requires_grad_(True)
         
         # Compute loss
-        loss, TN_G = objective_function_ATTR(X, G_list, E, config.inner_num_steps, config.inner_tol)
+        loss, TN_G = objective_function_ATNMF(X, rank, E, config.inner_num_steps, config.inner_tol, config.inner_dis_num, device='cuda')
 
         grads = torch.autograd.grad(loss, E, retain_graph=True, allow_unused=True)
-        print(f"Gradient of E: {grads}")
+        # print(f"Gradient of E: {grads}")
         # Backpropagation
         loss.backward()
         # print(loss.requires_grad)  # 确保损失函数需要梯度
+
+        # # 检查梯度
+        # print("梯度在反向传播后的值：", E.grad)
+
+        # Update E
+        optimizer.step()
 
         # Apply the constraint ||E||_F^2 <= epsilon
         if torch.norm(E) ** 2 > config.epsilon:
             E.data = config.epsilon * E / torch.norm(E)
 
-        # 检查梯度
-        print("梯度在反向传播后的值：", E.grad)
-
-        # Update E
-        optimizer.step()
-
-        rse_E = torch.norm(E - E_old)
-        print(f"Step {step}, RSE_E: {rse_E}")
+        # rse_E = torch.norm(E - E_old)
+        # print(f"Step {step}, RSE_E: {rse_E}")
 
         # 记录 norm2 结果到日志
         loss_sqrt = math.sqrt(abs(loss))
         loss_values.append(loss_sqrt)
-        logging.info(f"Step {step} norm(X - TN_G_Ours): {loss_sqrt}")
+
+        norm2_E = torch.norm(E.data).item() ** 2
+        logging.info(f"Step {step} norm(X - TN_G_Ours): {loss_sqrt}, norm2(E): {norm2_E}")
 
         if step % config.outer_dis_num == 0:
-            print(f"Step {step}, Loss: {loss.item()}")
+            print(f"Step {step}, Loss: {loss.item()}, norm2_E: {norm2_E}")
             
             
 
     return E, TN_G, loss_values
 
-def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
+def optimize_perturbation_comparison(X, rank, config: OptimizationConfig):
     """
     Optimize perturbation tensor \mathcal{E} using gradient descent for comparison.
     X: Original tensor (PyTorch tensor)
@@ -230,11 +199,7 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
         optimizer.zero_grad()
 
         # Compute loss
-        loss, TN_G = objective_function_ATR(X, G_list, E, config.inner_num_steps, config.inner_tol)
-
-        # Apply the constraint ||E||_F^2 <= config.epsilon
-        if torch.norm(E) ** 2 > config.epsilon:
-            E.data = config.epsilon * E / torch.norm(E)
+        loss, TN_G = objective_function_ANMF(X, rank, E, config.inner_num_steps, config.inner_tol, inner_dis_num, device='cuda')
 
         E_old = E.clone().detach()
 
@@ -247,64 +212,75 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
         # Update E
         optimizer.step()
 
-        rse_E = torch.norm(E - E_old)
-        print(f"Step {step}, RSE_E: {rse_E}")
+        # Apply the constraint ||E||_F^2 <= config.epsilon
+        if torch.norm(E) ** 2 > config.epsilon:
+            E.data = config.epsilon * E / torch.norm(E)
+
+        # rse_E = torch.norm(E - E_old)
+        # print(f"Step {step}, RSE_E: {rse_E}")
 
         # loss_sqrt = math.sqrt(abs(loss))
         # loss_values.append(loss_sqrt)
         norm2_X_TN_G = torch.norm(X - TN_G).item()
         rec_loss_values.append(norm2_X_TN_G)
-        logging.info(f"Step {step} norm(X - TN_G_ATR): {norm2_X_TN_G}")
+
+        norm2_E = torch.norm(E.data).item() ** 2
+        logging.info(f"Step {step} norm(X - TN_G_ATR): {norm2_X_TN_G}, norm2(E): {norm2_E}")
 
         if step != 0 and step % config.outer_dis_num == 0:
-            print(f"Comparison Step {step}, Loss: {loss.item()}")
+            print(f"Comparison Step {step}, Loss: {loss.item()}, norm2_E: {norm2_E}")
             
 
     return E, TN_G, rec_loss_values
 
 # Example usage
 if __name__ == "__main__":
-    # Example tensor X (3D for simplicity)
-    # 读取 Lena 图片
-    lena = Image.open('lena.png')
-    lena = np.array(lena)
-    X = torch.tensor(lena/255.0, dtype=torch.float32).to("cuda")
+
+    lena = Image.open('lena.png').convert('L')
+    V = np.array(lena, dtype=np.float32)  # Ensure the dtype is float32
+
+    # 将 V 转换为 PyTorch 张量并移动到 GPU
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    X = torch.tensor(V, device=device)/255
     
 
     # Decompose X into tensor train format
-    ranks = [5, 5, 5]  # Rank for each factor tensor
-    ranks = ranks + [ranks[0]]  # 最后一个 rank 应该等于第一个 rank
+    ranks = 50
     # tr_cores = tr.tr_decompose(X, ranks, max_iter=1, tol=1e-10, device="cuda")
-    shape = list(X.shape)
-    tr_cores = tr.initialize_tr_cores(shape, ranks, device="cuda")
+
 
     # Set input parameter 
-    epsilon = 1e2 # Frobenius norm constraint for perturbation tensor
-    logging.info(f"Norm2 (epsilon): {epsilon}")
+    epsilon = 5 # Frobenius norm constraint for perturbation tensor
     inner_tol = 1e-10 # Tolerance for inner optimization
     lr = 0.01  # Learning rate for gradient descent
-    outer_num_steps = 20 # Number of outer optimization steps
-    inner_num_steps = 50 # Number of inner optimization steps
+    outer_num_steps = 5000 # Number of outer optimization steps
+    inner_num_steps = 100 # Number of inner optimization steps
     outer_dis_num = 10 # Display loss every outer_dis_num steps
     inner_dis_num = 2000 # Display loss every inner_dis_num steps
+    logging.info(f"Optimization parameters:")
+    logging.info(f"epsilon (Frobenius norm constraint): {epsilon}")
+    logging.info(f"inner_tol (Tolerance for inner optimization): {inner_tol}")
+    logging.info(f"lr (Learning rate): {lr}")
+    logging.info(f"outer_num_steps (Number of outer optimization steps): {outer_num_steps}")
+    logging.info(f"inner_num_steps (Number of inner optimization steps): {inner_num_steps}")
+    logging.info(f"outer_dis_num (Display loss every outer_dis_num steps): {outer_dis_num}")
+    logging.info(f"inner_dis_num (Display loss every inner_dis_num steps): {inner_dis_num}")
 
     config = OptimizationConfig(epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol)
 
     # Optimize perturbation \mathcal{E}
     X.requires_grad_(True)
-    # E_optimized, TN_G, loss_ours = optimize_perturbation(X, tr_cores, config)
-    E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
+    E_optimized, TN_G, loss_ours = optimize_perturbation(X, ranks, config)
 
     # 计算 norm2
     norm2_our_algorithm = torch.norm(X - TN_G).item()
     # 打印 norm2 结果
     print(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
-    # 记录 norm2 结果到日志
-    logging.info(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
+    
 
     if compare_method_enabled:
         # Optimize perturbation \mathcal{E} using comparison algorithm
-        E_comparison, TN_G_comparison, loss_ATR = optimize_perturbation_comparison(X, tr_cores, config)
+        E_comparison, TN_G_comparison, loss_ATR = optimize_perturbation_comparison(X, ranks, config)
         norm2_comparison_algorithm = torch.norm(X - TN_G_comparison).item()
         print(f"Norm2 (Comparison Algorithm): {norm2_comparison_algorithm}")
         logging.info(f"Norm2 (Comparison Algorithm): {norm2_comparison_algorithm}")
@@ -312,10 +288,12 @@ if __name__ == "__main__":
         X_E_comparison_cpu = (X + E_comparison).cpu().detach().numpy()
         TN_G_comparison = (TN_G_comparison).cpu().detach().numpy()
 
-    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps, tol=1e-10, device="cuda")
-    TN_G_ori = tl.tr_to_tensor(tr_cores) 
+    W, H = mynmf.nmf(X, ranks, num_iterations=inner_num_steps, tol=1e-10, device="cuda")
+    TN_G_ori = torch.mm(W, H)
     norm2_original_TR_algorithm = torch.norm(X - TN_G_ori).item()
     print(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
+    # 记录 norm2 结果到日志
+    logging.info(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
     logging.info(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
 
 
@@ -341,14 +319,14 @@ if __name__ == "__main__":
 
         images = [
         X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
-        white_image, E_cpu, X_E_cpu, TN_G,      # 第二行
-        white_image, E_comparison_cpu, X_E_comparison_cpu, TN_G_comparison  # 第三行
+        X_cpu, E_cpu, X_E_cpu, TN_G,      # 第二行
+        X_cpu, E_comparison_cpu, X_E_comparison_cpu, TN_G_comparison  # 第三行
         ]   
 
         titles = [
             'Original Image', 'Empty Noise', 'Original Image', 'TR Reconstructed Image',  # 第一行
-            '  ', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
-            '  ', 'ATR Adversarial Noise', 'ATR Adversarial Noisy Image', 'ATR Reconstructed Image'  # 第二行
+            'Original Image', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
+            'Original Image', 'ATR Adversarial Noise', 'ATR Adversarial Noisy Image', 'ATR Reconstructed Image'  # 第二行
         ]
     
         display_images(X_cpu, images, titles, 3, 4, save_path=save_path)
@@ -365,5 +343,12 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig(f'result/loss_plot_{current_time}.png')
         plt.show()
+
+        loss_dict = {
+            'Ours': loss_ours,
+            'Comparison': loss_ATR
+        }
+        loss_plot_path = os.path.join( 'result_NMF/loss_plot.png')
+        display_line_graphs(loss_dict, save_path=loss_plot_path)
 
     
