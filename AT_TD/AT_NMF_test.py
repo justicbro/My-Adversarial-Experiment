@@ -84,7 +84,8 @@ def objective_function_ATNMF(X, rank, E, iner_num_steps = 100, inner_tol = 1e-10
     G_list: List of factor tensors in tensor train format
     E: Perturbation tensor (PyTorch tensor)
     """
-    lambda2 = 5
+    # lambda2 = 5
+    lambda2 = 0
 
     X_tube = X + E
 
@@ -128,8 +129,9 @@ def optimize_perturbation(X, rank, config: OptimizationConfig):
     # Initialize perturbation tensor \mathcal{E}
     E = torch.randn_like(X, requires_grad=True, device='cuda')
     # Apply the constraint ||E||_F^2 <= epsilon
+    scaling_factor = config.epsilon ** 0.5 / torch.norm(E)
     if torch.norm(E) ** 2 > config.epsilon:
-        E.data = config.epsilon * E / torch.norm(E)
+        E.data = scaling_factor * E 
 
     loss_values = []
 
@@ -158,8 +160,9 @@ def optimize_perturbation(X, rank, config: OptimizationConfig):
         optimizer.step()
 
         # Apply the constraint ||E||_F^2 <= epsilon
+        scaling_factor = config.epsilon ** 0.5 / torch.norm(E)
         if torch.norm(E) ** 2 > config.epsilon:
-            E.data = config.epsilon * E / torch.norm(E)
+            E.data = scaling_factor * E 
 
         # rse_E = torch.norm(E - E_old)
         # print(f"Step {step}, RSE_E: {rse_E}")
@@ -168,7 +171,7 @@ def optimize_perturbation(X, rank, config: OptimizationConfig):
         loss_sqrt = math.sqrt(abs(loss))
         loss_values.append(loss_sqrt)
 
-        norm2_E = torch.norm(E.data).item() ** 2
+        norm2_E = torch.norm(E.data).item()
         logging.info(f"Step {step} norm(X - TN_G_Ours): {loss_sqrt}, norm2(E): {norm2_E}")
 
         if step % config.outer_dis_num == 0:
@@ -188,8 +191,9 @@ def optimize_perturbation_comparison(X, rank, config: OptimizationConfig):
     # Initialize perturbation tensor \mathcal{E}
     E = torch.randn_like(X, requires_grad=True, device='cuda')
     # Apply the constraint ||E||_F^2 <= epsilon
+    scaling_factor = config.epsilon ** 0.5 / torch.norm(E)
     if torch.norm(E) ** 2 > config.epsilon:
-        E.data = config.epsilon * E / torch.norm(E)
+        E.data = scaling_factor * E 
 
     optimizer = torch.optim.Adam([E], lr=config.lr)
 
@@ -213,8 +217,9 @@ def optimize_perturbation_comparison(X, rank, config: OptimizationConfig):
         optimizer.step()
 
         # Apply the constraint ||E||_F^2 <= config.epsilon
+        scaling_factor = config.epsilon ** 0.5 / torch.norm(E)
         if torch.norm(E) ** 2 > config.epsilon:
-            E.data = config.epsilon * E / torch.norm(E)
+            E.data = scaling_factor * E 
 
         # rse_E = torch.norm(E - E_old)
         # print(f"Step {step}, RSE_E: {rse_E}")
@@ -224,7 +229,7 @@ def optimize_perturbation_comparison(X, rank, config: OptimizationConfig):
         norm2_X_TN_G = torch.norm(X - TN_G).item()
         rec_loss_values.append(norm2_X_TN_G)
 
-        norm2_E = torch.norm(E.data).item() ** 2
+        norm2_E = torch.norm(E.data).item()
         logging.info(f"Step {step} norm(X - TN_G_ATR): {norm2_X_TN_G}, norm2(E): {norm2_E}")
 
         if step != 0 and step % config.outer_dis_num == 0:
@@ -250,13 +255,14 @@ if __name__ == "__main__":
 
 
     # Set input parameter 
-    epsilon = 5 # Frobenius norm constraint for perturbation tensor
+    epsilon = 0.1 ** 2# Frobenius norm constraint for perturbation tensor
     inner_tol = 1e-10 # Tolerance for inner optimization
-    lr = 0.01  # Learning rate for gradient descent
-    outer_num_steps = 5000 # Number of outer optimization steps
+    lr = 0.0001  # Learning rate for gradient descent
+    outer_num_steps = 300 # Number of outer optimization steps
     inner_num_steps = 100 # Number of inner optimization steps
     outer_dis_num = 10 # Display loss every outer_dis_num steps
     inner_dis_num = 2000 # Display loss every inner_dis_num steps
+    logging.info(f"Proposed-ATNMF Experiment")
     logging.info(f"Optimization parameters:")
     logging.info(f"epsilon (Frobenius norm constraint): {epsilon}")
     logging.info(f"inner_tol (Tolerance for inner optimization): {inner_tol}")
@@ -333,7 +339,29 @@ if __name__ == "__main__":
         # loss_ours = [loss.cpu().detach().numpy() for loss in loss_ours]
         # loss_ATR = [loss.cpu().detach().numpy() for loss in loss_ATR]
 
-        plt.figure(figsize=(10, 5))
+        # plt.figure(figsize=(10, 5))
+        # plt.plot(loss_ours, label='Ours')
+        # plt.plot(loss_ATR, label='Comparison')
+        # plt.xlabel('Step')
+        # plt.ylabel('Loss (sqrt)')
+        # plt.title('Loss over Steps')
+        # plt.legend()
+        # plt.grid(True)
+        # plt.savefig(f'result/loss_plot_{current_time}.png')
+        # plt.show()
+
+        # loss_dict = {
+        #     'Ours': loss_ours,
+        #     'Comparison': loss_ATR
+        # }
+        # loss_plot_path = os.path.join( 'result_NMF/loss_plot.png')
+        # display_line_graphs(loss_dict, save_path=loss_plot_path)
+
+        # 创建一个包含三个子图的图形
+        plt.figure(figsize=(15, 10))
+
+        # 第一个子图：同时显示 loss_ours 和 loss_ATR
+        plt.subplot(3, 1, 1)
         plt.plot(loss_ours, label='Ours')
         plt.plot(loss_ATR, label='Comparison')
         plt.xlabel('Step')
@@ -341,14 +369,40 @@ if __name__ == "__main__":
         plt.title('Loss over Steps')
         plt.legend()
         plt.grid(True)
+
+        # 第二个子图：显示 loss_ours
+        plt.subplot(3, 1, 2)
+        plt.plot(loss_ours, label='Ours', color='blue')
+        plt.xlabel('Step')
+        plt.ylabel('Loss (sqrt)')
+        plt.title('Loss over Steps (Ours)')
+        plt.legend()
+        plt.grid(True)
+
+        # 第三个子图：显示 loss_ATR
+        plt.subplot(3, 1, 3)
+        plt.plot(loss_ATR, label='Comparison', color='orange')
+        plt.xlabel('Step')
+        plt.ylabel('Loss (sqrt)')
+        plt.title('Loss over Steps (Comparison)')
+        plt.legend()
+        plt.grid(True)
+
+        # 调整子图布局
+        plt.tight_layout()
+
+        # 保存图形
         plt.savefig(f'result/loss_plot_{current_time}.png')
+
+        # 显示图形
         plt.show()
 
+        # 保存 loss_ours 和 loss_ATR 到字典并显示折线图
         loss_dict = {
             'Ours': loss_ours,
             'Comparison': loss_ATR
         }
-        loss_plot_path = os.path.join( 'result_NMF/loss_plot.png')
+        loss_plot_path = os.path.join('result_NMF/loss_plot.png')
         display_line_graphs(loss_dict, save_path=loss_plot_path)
 
     
