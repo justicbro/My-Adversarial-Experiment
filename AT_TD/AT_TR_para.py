@@ -128,7 +128,7 @@ def objective_function_ATR(X, G_list, E, inner_num_steps, inner_tol):
 
     loss_values = []
 
-    return -torch.norm(X+E - TN_G) ** 2, TN_G  # Example: Minimize the norm instead of maximizing
+    return -torch.norm(X+E - TN_G) ** 2, TN_G, tr_cores  # Example: Minimize the norm instead of maximizing
 
 def objective_function_ATTR_simp(X, G_list, E, E_unfold, inner_num_steps, inner_tol):
     """
@@ -453,12 +453,12 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
         optimizer.zero_grad()
 
         # Compute loss
-        loss, TN_G = objective_function_ATR(X, G_list, E, config.inner_num_steps, config.inner_tol)
+        loss, TN_G, G_list = objective_function_ATR(X, G_list, E, config.inner_num_steps, config.inner_tol)
 
         E_old = E.clone().detach()
 
         # Backpropagation
-        loss.backward()
+        loss.backward(retain_graph=True)
 
         # # 检查梯度
         # print("梯度在反向传播后的值：", E.grad)
@@ -505,16 +505,21 @@ if __name__ == "__main__":
     tr_cores = tr.initialize_tr_cores(shape, ranks, device="cuda")
 
     # Set input parameter 
-    epsilon = (0.1)**2 # Frobenius norm constraint for perturbation tensor
-    logging.info(f"Norm2 (epsilon): {epsilon}")
-    inner_tol = 0 # Tolerance for inner optimization
+    # epsilon = (0.1)**2 # Frobenius norm constraint for perturbation tensor
+    # 定义不同的 epsilon 值
+    epsilon_values = [0.1, 0.5, 1.0, 5, 10, 50, 100, 500, 1000, 5000, 10000]
+    # 初始化损失列表
+    loss_ours = []
+    loss_comparison = []
+    
+    inner_tol = 1e-10 # Tolerance for inner optimization
     lr = 0.01  # Learning rate for gradient descent
     outer_num_steps = 50 # Number of outer optimization steps
     inner_num_steps = 500 # Number of inner optimization steps
     outer_dis_num = 1 # Display loss every outer_dis_num steps
     inner_dis_num = 2000 # Display loss every inner_dis_num steps
     logging.info(f"Optimization parameters:")
-    logging.info(f"epsilon (Frobenius norm constraint): {epsilon}")
+    # logging.info(f"epsilon (Frobenius norm constraint): {epsilon}")
     logging.info(f"inner_tol (Tolerance for inner optimization): {inner_tol}")
     logging.info(f"lr (Learning rate): {lr}")
     logging.info(f"outer_num_steps (Number of outer optimization steps): {outer_num_steps}")
@@ -522,157 +527,43 @@ if __name__ == "__main__":
     logging.info(f"outer_dis_num (Display loss every outer_dis_num steps): {outer_dis_num}")
     logging.info(f"inner_dis_num (Display loss every inner_dis_num steps): {inner_dis_num}")
 
-    config = OptimizationConfig(epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol)
+    
 
     # Optimize perturbation \mathcal{E}
     X.requires_grad_(True)
-    E_optimized, TN_G, loss_ours = optimize_perturbation(X, tr_cores, config)
-    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplified_2(X, tr_cores, config)
-    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
+    for epsilon in epsilon_values:
+        config = OptimizationConfig(epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol)
+        logging.info(f"Norm2 (epsilon): {epsilon}")
+        config.epsilon = epsilon  # Frobenius norm constraint for perturbation tensor
 
-    # 计算 norm2
-    norm2_our_algorithm = torch.norm(X - TN_G).item()
-    
+        # 运行 optimize_perturbation
+        E_optimized, TN_G, loss_ours_list = optimize_perturbation(X, tr_cores, config)
+        loss_ours.append(loss_ours_list[-1])  # 记录最后一步的损失
 
-    if compare_method_enabled:
-        # Optimize perturbation \mathcal{E} using comparison algorithm
-        E_comparison, TN_G_comparison, loss_ATR = optimize_perturbation_comparison(X, tr_cores, config)
-        norm2_comparison_algorithm = torch.norm(X - TN_G_comparison).item()
-        print(f"Norm2 (Comparison Algorithm): {norm2_comparison_algorithm}")
-        logging.info(f"Norm2 (Comparison Algorithm): {norm2_comparison_algorithm}")
-        E_comparison_cpu = E_comparison.cpu().detach().numpy()
-        X_E_comparison_cpu = (X + E_comparison).cpu().detach().numpy()
-        TN_G_comparison = (TN_G_comparison).cpu().detach().numpy()
+        # 运行 optimize_perturbation_comparison
+        E_optimized_comp, TN_G_comp, loss_comparison_list = optimize_perturbation_comparison(X, tr_cores, config)
+        loss_comparison.append(loss_comparison_list[-1])  # 记录最后一步的损失
         
 
-    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps*outer_num_steps, tol=inner_tol, device="cuda")
+    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps, tol=1e-10, device="cuda")
     TN_G_ori = tl.tr_to_tensor(tr_cores) 
     norm2_original_TR_algorithm = torch.norm(X - TN_G_ori).item()
 
+# 绘制折线图
+plt.figure(figsize=(10, 6))
+plt.plot(epsilon_values, loss_ours, label='Ours', marker='o')
+plt.plot(epsilon_values, loss_comparison, label='Comparison', marker='x')
+plt.xscale('log')  # 使用对数刻度
+plt.yscale('log')  # 使用对数刻度
+plt.xlabel('Epsilon')
+plt.ylabel('Loss')
+plt.title('Loss vs Epsilon')
+plt.legend()
+plt.grid(True)
 
-    print(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
-    logging.info(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
+# 保存图像
+plt.savefig('loss_vs_epsilon.png')
 
-    # 打印 norm2 结果
-    print(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
-    # 记录 norm2 结果到日志
-    logging.info(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
-
-
-    if imshow_enabled:
-        # 将张量从 CUDA 移动到 CPU 并转换为 NumPy 数组
-        X_cpu = X.cpu().detach().numpy()
-        E_cpu = E_optimized.cpu().detach().numpy()
-        X_E_cpu = (X + E_optimized).cpu().detach().numpy()
-        TN_G = (TN_G).cpu().detach().numpy()
-        TN_G_ori = TN_G_ori.cpu().detach().numpy()
-
-
-        # 创建一个全白的图像
-        white_image = np.ones_like(X_cpu)
-
-        # 创建一个全黑的图像
-        black_image = np.zeros_like(X_cpu)
-
-
-        # 获取当前时间并格式化为字符串
-        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_path = f'result/lena_comparison_{current_time}.png'
-        if compare_method_enabled:
-                
-            images = [
-            X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
-            white_image, E_cpu, X_E_cpu, TN_G,      # 第二行
-            white_image, E_comparison_cpu, X_E_comparison_cpu, TN_G_comparison  # 第三行
-            ]   
-
-            titles = [
-                'Original Image', 'Empty Noise', 'Original Image', 'TR Reconstructed Image',  # 第一行
-                '  ', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
-                '  ', 'ATR Adversarial Noise', 'ATR Adversarial Noisy Image', 'ATR Reconstructed Image'  # 第二行
-            ]
-        
-            display_images(X_cpu, images, titles, 3, 4, save_path=save_path)
-            # loss_ours = [loss.cpu().detach().numpy() for loss in loss_ours]
-            # loss_ATR = [loss.cpu().detach().numpy() for loss in loss_ATR]
-
-            # plt.figure(figsize=(10, 5))
-            # plt.plot(loss_ours, label='Ours')
-            # plt.plot(loss_ATR, label='Comparison')
-            # plt.xlabel('Step')
-            # plt.ylabel('Loss (sqrt)')
-            # plt.title('Loss over Steps')
-            # plt.legend()
-            # plt.grid(True)
-            # plt.savefig(f'result/loss_plot_{current_time}.png')
-            # plt.show()
-
-            # 创建一个包含三个子图的图形
-            plt.figure(figsize=(15, 10))
-
-            # 第一个子图：同时显示 loss_ours 和 loss_ATR
-            plt.subplot(3, 1, 1)
-            plt.plot(loss_ours, label='Ours')
-            plt.plot(loss_ATR, label='Comparison')
-            plt.xlabel('Step')
-            plt.ylabel('Loss (sqrt)')
-            plt.title('Loss over Steps')
-            plt.legend()
-            plt.grid(True)
-
-            # 第二个子图：显示 loss_ours
-            plt.subplot(3, 1, 2)
-            plt.plot(loss_ours, label='Ours', color='blue')
-            plt.xlabel('Step')
-            plt.ylabel('Loss (sqrt)')
-            plt.title('Loss over Steps (Ours)')
-            plt.legend()
-            plt.grid(True)
-
-            # 第三个子图：显示 loss_ATR
-            plt.subplot(3, 1, 3)
-            plt.plot(loss_ATR, label='Comparison', color='orange')
-            plt.xlabel('Step')
-            plt.ylabel('Loss (sqrt)')
-            plt.title('Loss over Steps (Comparison)')
-            plt.legend()
-            plt.grid(True)
-
-            # 调整子图布局
-            plt.tight_layout()
-
-            # 保存图形
-            plt.savefig(f'result/loss_plot_{current_time}.png')
-
-            # 显示图形
-            plt.show()
-
-            # 保存 loss_ours 和 loss_ATR 到字典并显示折线图
-            loss_dict = {
-                'Ours': loss_ours,
-                'Comparison': loss_ATR
-            }
-            loss_plot_path = os.path.join('result_NMF/loss_plot.png')
-            display_line_graphs(loss_dict, save_path=loss_plot_path)
-        else:
-            images = [
-            X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
-            white_image, E_cpu, X_E_cpu, TN_G     # 第二行
-            ]   
-
-            titles = [
-                'Original Image', 'Empty Noise', 'Original Image', 'TR Reconstructed Image',  # 第一行
-                '  ', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
-            ]
-        
-            display_images(X_cpu, images, titles, 2, 4, save_path=save_path)
-
-            plt.figure(figsize=(10, 5))
-            plt.plot(loss_ours, label='Ours')
-            plt.xlabel('Step')
-            plt.ylabel('Loss (sqrt)')
-            plt.title('Loss over Steps')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(f'result/loss_plot_{current_time}.png')
-            plt.show()
+# 显示图像
+plt.show()
+    

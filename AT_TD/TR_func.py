@@ -47,7 +47,8 @@ def generalized_k_contraction(X, Y, modes_X, modes_Y, k):
     Y_unfolded = generalized_k_unfolding(Y, modes_Y, k)  # 按第一个模式展开
 
     # 对齐的模式进行矩阵乘积
-    contracted = torch.matmul(X_unfolded_T, Y_unfolded)
+    # contracted = torch.matmul(X_unfolded_T, Y_unfolded)
+    contracted = X_unfolded_T @ Y_unfolded
 
     sorted_dims_X = [X.shape[i] for i in modes_X[k+1:]]
     sorted_dims_Y = [Y.shape[i] for i in modes_Y[k+1:]]
@@ -85,12 +86,14 @@ def contract_except_n(cores, n):
         new_dims = [dims[-1]] + dims[:-1]
         core_i_dims = list(range(cores[cont_seq[i]].ndim))
         full_tensor = generalized_k_contraction(full_tensor, cores[cont_seq[i]], new_dims, core_i_dims, 0)
+        if not isinstance(full_tensor, torch.Tensor):
+            raise TypeError("full_tensor is not a torch.Tensor")
         # print("full_tensor shape", full_tensor.shape)
 
     # 将结果转换回 PyTorch 张量
-    result = torch.tensor(full_tensor, requires_grad=True, dtype=torch.float32).to(cores[0].device)
-
-    return result
+    # result = torch.tensor(full_tensor, requires_grad=True, dtype=torch.float32).to(cores[0].device)
+    # result = full_tensor
+    return full_tensor
 
 def generalized_k_unfolding(X, modes, k):
     """
@@ -115,8 +118,8 @@ def generalized_k_unfolding(X, modes, k):
 
     # 计算新的矩阵形状
     # print("prod X_k", torch.prod(torch.tensor([X.shape[i] for i in modes[:k]])).item())
-    unfold_shape = (torch.prod(torch.tensor(permuted_X.shape[:k+1])).item(),
-                    torch.prod(torch.tensor(permuted_X.shape[k+1:])).item())
+    unfold_shape = (torch.prod(torch.tensor(permuted_X.shape[:k+1])),
+                    torch.prod(torch.tensor(permuted_X.shape[k+1:])))
 
     
     # 将调整后的张量 reshape 成矩阵
@@ -128,7 +131,7 @@ def generalized_k_unfolding(X, modes, k):
 
 def als_update_tr(X, cores, n, device):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, requires_grad=True, device=device)
+    # X = tl.tensor(X, requires_grad=True, device=device)
 
     # 计算除 cores[n] 之外的张量积
     X_hat = contract_except_n(cores, n)
@@ -144,23 +147,49 @@ def als_update_tr(X, cores, n, device):
     X_dims= list(range(X.dim()))
     new_X_dims = [X_dims[n]] + X_dims[n+1:] + X_dims[:n]
     X_unfold = generalized_k_unfolding(X, new_X_dims, 0)
-    X_unfold = torch.tensor(X_unfold, requires_grad=True, dtype=torch.float32).to(device)
+    # X_unfold = torch.tensor(X_unfold, requires_grad=True, dtype=torch.float32).to(device)
     # X_unfold_T = X_unfold.T
 
-
-    new_core = X_unfold@X_hat_unfold.T@torch.linalg.pinv(X_hat_unfold@X_hat_unfold.T)
+    reg = 1e-5
+    new_core = X_unfold@X_hat_unfold.T@torch.linalg.inv(X_hat_unfold@X_hat_unfold.T+ reg * torch.eye(X_hat_unfold.shape[0], device=device))
+    # new_core = X_unfold@torch.linalg.pinv(X_hat_unfold + 1e-5 * torch.eye(X_hat_unfold.size(0), X_hat_unfold.size(1), device='cuda'))
     # new_core = X_unfold @ X_hat_unfold.T @ torch.pinverse(X_hat_unfold @ X_hat_unfold.T)
 
     new_core = new_core.reshape(cores[n].shape[1], cores[n].shape[0], cores[n].shape[2])
     permuted_new_core = new_core.permute(1,0,2)
     return permuted_new_core
 
-def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
+# Tring to find the aviliable gradient back of the als_update_tr
+def als_update_tr_2(X, cores, n, device):
+
+    # 计算除 cores[n] 之外的张量积
+    X_hat = contract_except_n(cores, n)
+
+    dims = list(range(X_hat.dim()))
+    new_dims = [dims[-1]] + dims[:-1]
+    X_hat_unfold = generalized_k_unfolding(X_hat, new_dims, 1)
+
+    X_dims= list(range(X.dim()))
+    new_X_dims = [X_dims[n]] + X_dims[n+1:] + X_dims[:n]
+    X_unfold = generalized_k_unfolding(X, new_X_dims, 0)
+    X_unfold = torch.tensor(X_unfold, requires_grad=True, dtype=torch.float32).to(device)
+
+
+
+    new_core = X_unfold@X_hat_unfold.T@torch.linalg.pinv(X_hat_unfold@X_hat_unfold.T)
+
+    new_core = new_core.reshape(cores[n].shape[1], cores[n].shape[0], cores[n].shape[2])
+    permuted_new_core = new_core.permute(1,0,2)
+    return permuted_new_core
+
+def tr_decompose(X, ranks, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, requires_grad=True, device=device)
+    # X = tl.tensor(X, requires_grad=True, device=device)
 
     shape = list(X.shape)
     cores = initialize_tr_cores(shape, ranks, device)
+    for core in cores:
+        core.requires_grad_(True)
     prev_loss = float('inf')
     
     for iteration in range(max_iter):
@@ -172,10 +201,10 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
         loss = torch.norm(X - X_hat) / torch.norm(X)
         
         if abs(prev_loss-loss) < tol:
-            print(f"Converged at iteration {iteration + 1}")
+            # print(f"Converged at iteration {iteration + 1}")
             break
 
-        if iteration % 10 == 0:
+        if iteration != 0 and iteration % dis_num == 0:
             print(f"Iteration {iteration + 1}, Loss: {loss.item():.6f}")
         
         prev_loss = loss
@@ -184,7 +213,7 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, device="cuda"):
 
 def tr_decompose2(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     # 确保 X 是一个正确的张量
-    X = tl.tensor(X, requires_grad=True, device=device)
+    # X = tl.tensor(X, requires_grad=True, device=device)
     # print("X + E requires_grad:", X.requires_grad)
 
     shape = list(X.shape)
@@ -193,6 +222,31 @@ def tr_decompose2(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"
     for iteration in range(max_iter):
         for n in range(len(shape)):
             cores[n] = als_update_tr(X, cores, n, device)
+        
+        # 重建张量计算损失
+        X_hat = tl.tr_to_tensor(cores)
+        loss = torch.norm(X - X_hat) / torch.norm(X)
+        
+        if abs(prev_loss-loss) < tol:
+            # print(f"Converged at iteration {iteration + 1}")
+            break
+
+        if iteration != 0 and iteration % dis_num == 0:
+            print(f"Iteration {iteration + 1}, TRD_Loss: {loss.item():.6f}")
+        
+        prev_loss = loss
+    
+    return cores
+
+# Trying to find the aviliable gradient back of the tr_decompose 
+def tr_decompose3(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
+
+    shape = list(X.shape)
+    prev_loss = float('inf')
+    
+    for iteration in range(max_iter):
+        for n in range(len(shape)):
+            cores[n] = als_update_tr_2(X, cores, n, device)
         
         # 重建张量计算损失
         X_hat = tl.tr_to_tensor(cores)
