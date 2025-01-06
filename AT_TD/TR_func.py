@@ -6,6 +6,7 @@ from tensorly import unfold, fold
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+import gc
 
 def initialize_tr_cores(shape, ranks, device):
     cores = []
@@ -125,6 +126,10 @@ def generalized_k_unfolding(X, modes, k):
     # 将调整后的张量 reshape 成矩阵
     unfolded_X = permuted_X.reshape(unfold_shape)
 
+    # del permuted_X, unfold_shape
+    # gc.collect()
+    torch.cuda.empty_cache()
+
     return unfolded_X
 
 
@@ -132,6 +137,20 @@ def generalized_k_unfolding(X, modes, k):
 def als_update_tr(X, cores, n, device):
     # 确保 X 是一个正确的张量
     # X = tl.tensor(X, requires_grad=True, device=device)
+    # norm2X = torch.norm(X)**2
+    # print("norm2X", norm2X)
+    # 将张量 X 转换为 NumPy 数组
+    # X_np = X.cpu().detach().numpy()
+    # X_np = np.clip(X_np, 0, 1)  # 将张量值裁剪到 [0, 1] 区间
+
+    # # 显示图像
+    # plt.imshow(X_np)
+    # plt.title('Image X')
+    # plt.colorbar()
+    # plt.show()
+
+    # # 保存图像到文件
+    # plt.imsave('image_completion_test_X.png', X_np)
 
     # 计算除 cores[n] 之外的张量积
     X_hat = contract_except_n(cores, n)
@@ -157,6 +176,10 @@ def als_update_tr(X, cores, n, device):
 
     new_core = new_core.reshape(cores[n].shape[1], cores[n].shape[0], cores[n].shape[2])
     permuted_new_core = new_core.permute(1,0,2)
+
+    # del new_core, X_hat, X_hat_unfold, X_unfold
+    # gc.collect()
+    # torch.cuda.empty_cache()
     return permuted_new_core
 
 # Tring to find the aviliable gradient back of the als_update_tr
@@ -208,6 +231,7 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, dis_num = 10, device="cuda")
             print(f"Iteration {iteration + 1}, Loss: {loss.item():.6f}")
         
         prev_loss = loss
+
     
     return cores
 
@@ -264,7 +288,7 @@ def tr_decompose3(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"
     return cores
 
 
-def tensor_completion(X, mask, ranks, max_iter=500, tol=1e-10, device="cuda"):
+def tensor_completion(X, mask, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     """
     Perform tensor completion using TR-ALS.
     
@@ -281,18 +305,23 @@ def tensor_completion(X, mask, ranks, max_iter=500, tol=1e-10, device="cuda"):
     """
     # Initialize TR cores
     shape = list(X.shape)
-    cores = initialize_tr_cores(shape, ranks, device)
+    # cores = initialize_tr_cores(shape, ranks, device)
     prev_loss = float('inf')
+    X = X*mask
+    X_real = X.clone().detach()
     
     for iteration in range(max_iter):
         for n in range(len(shape)):
-            cores[n] = als_update_tr(X * mask, cores, n, device)
+            cores[n] = als_update_tr(X, cores, n, device)
         
         # Reconstruct the tensor from TR cores
-        X_hat = tl.tr_to_tensor(cores)
+        X = tl.tr_to_tensor(cores)
         
         # Compute the loss only on observed entries
-        loss = torch.norm((X - X_hat) * mask) / torch.norm(X * mask)
+        loss = torch.norm((X_real - X) * mask) / torch.norm(X * mask)
+
+        # 更新 X 中 mask 元素为 1 的位置为 X 中对应的元素
+        X[mask == 1] = X_real[mask == 1]
         
         if abs(prev_loss - loss) < tol:
             print(f"Converged at iteration {iteration + 1}")
@@ -300,10 +329,16 @@ def tensor_completion(X, mask, ranks, max_iter=500, tol=1e-10, device="cuda"):
         
         prev_loss = loss
         
-        if iteration % 10 == 0:
+        if iteration != 0 and iteration % dis_num == 0:
             print(f"Iteration {iteration + 1}, Loss: {loss.item()}")
+
+        
     
-    return X_hat
+    # del X_real
+    # gc.collect()
+    # torch.cuda.empty_cache()
+    
+    return X, cores
 
 def reconstruct_tr(cores):
     """

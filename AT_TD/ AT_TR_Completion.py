@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 import os
 import math
+import gc
 
 
 # 指定使用第 0 张 GPU 卡
@@ -45,7 +46,7 @@ if log_enabled:
 tl.set_backend('pytorch')  # Set tensorly to use PyTorch backend
 
 class OptimizationConfig:
-    def __init__(self, epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol):
+    def __init__(self, epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol, my_device):
         self.epsilon = epsilon
         self.lr = lr
         self.outer_num_steps = outer_num_steps
@@ -53,6 +54,7 @@ class OptimizationConfig:
         self.outer_dis_num = outer_dis_num
         self.inner_dis_num = inner_dis_num
         self.inner_tol = inner_tol
+        self.my_device = my_device
 
 def display_line_graphs(loss_dict, figsize=(10, 5), save_path=None):
     plt.figure(figsize=figsize)
@@ -89,9 +91,9 @@ def display_images(original_image, images, titles, rows, cols, figsize=(20, 10),
         plt.savefig(save_path)
     plt.show()
 
-def objective_function_ATTR(X, G_list, E, iner_num_steps = 100, inner_tol = 1e-10):
+def objective_function_ATTR(X, mask, G_list, E, iner_num_steps = 100, inner_tol = 1e-10, my_device="cuda"):
     """
-    Compute the objective function ||X - TN([G^(k)])||_F^2.
+    Compute the objective function ||X - TN([G^(k)])||_F^2.q
     X: Original tensor (PyTorch tensor)
     G_list: List of factor tensors in tensor train format
     E: Perturbation tensor (PyTorch tensor)
@@ -103,22 +105,19 @@ def objective_function_ATTR(X, G_list, E, iner_num_steps = 100, inner_tol = 1e-1
 
     X_tube = X + E
 
-    tr_cores = tr.tr_decompose2(X_tube, G_list, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device="cuda")
+    TN_G, tr_cores = tr.tensor_completion(X_tube, mask, G_list, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device=my_device)
     # tr_cores = tr.tr_decompose(X_tube, ranks, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device="cuda")
 
-    del X_tube
-    torch.cuda.empty_cache()
+    # del X_tube
+    # gc.collect()
+    # torch.cuda.empty_cache()
 
     # 确保 tr_cores 启用了梯度追踪
     for core in tr_cores:
         core.requires_grad_(True)
 
-    TN_G = tl.tr_to_tensor(tr_cores)  # Reconstruct tensor from tensor train
-    # # 在计算损失之前检查 TN_G 的状态
-    # print("TN_G requires_grad:", TN_G.requires_grad)
-    # print("X requires_grad:", X.requires_grad)
-    # print("E requires_grad:", E.requires_grad)
-    # optimizer = torch.optim.Adam([E], lr=config.lr)
+    # TN_G = tl.tr_to_tensor(tr_cores)  # Reconstruct tensor from tensor train
+
     return -torch.norm(X - TN_G) ** 2, TN_G, tr_cores
 
 def objective_function_ATR(X, G_list, E, inner_num_steps, inner_tol):
@@ -345,7 +344,7 @@ def optimize_perturbation_simplifed(X, G_list, config: OptimizationConfig):
 
     return E, TN_G, loss_list
 
-def optimize_perturbation(X, G_list, config: OptimizationConfig):
+def optimize_perturbation(X, mask, G_list, config: OptimizationConfig):
     """
     Optimize perturbation tensor \mathcal{E} using gradient descent.
     X: Original tensor (PyTorch tensor)
@@ -356,7 +355,7 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
     """
     loss_list = []
     # Initialize perturbation tensor \mathcal{E}
-    E = torch.randn_like(X, requires_grad=True, device='cuda')
+    E = torch.randn_like(X, requires_grad=True, device=my_device)
     # Apply the constraint ||E||_F^2 <= epsilon
     scaling_factor = (config.epsilon ** 0.5) / torch.norm(E)
     if torch.norm(E) ** 2 > config.epsilon:
@@ -372,7 +371,7 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
         E_old = E.clone().detach()
             
         # Compute loss
-        loss, TN_G, G_list = objective_function_ATTR(X, G_list, E, config.inner_num_steps, config.inner_tol)
+        loss, TN_G, G_list = objective_function_ATTR(X, mask, G_list, E, config.inner_num_steps, config.inner_tol, config.my_device)
 
         # print(f"TN_G max: {TN_G.max()}, min: {TN_G.min()}")
 
@@ -435,9 +434,10 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
 
         TN_G2 = TN_G.clone().detach()
 
-        # 释放计算图
-        del loss, TN_G
-        torch.cuda.empty_cache()
+        # # 释放计算图
+        # del loss, TN_G, E_plus_X, E_plus_X_clamp, E_old
+        # gc.collect()
+        # torch.cuda.empty_cache()
             
 
     return E, TN_G2, loss_list
@@ -504,19 +504,32 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
 if __name__ == "__main__":
     # Example tensor X (3D for simplicity)
     # 读取 Lena 图片
+    my_device = "cuda"
     lena = Image.open('lena.png')
     lena = np.array(lena)
-    X = torch.tensor(lena/255.0, dtype=torch.float32).to("cuda")
+    X = torch.tensor(lena/255.0, dtype=torch.float32).to(device=my_device)
+
+    # 生成与 X 大小相同的二值掩码（mask）张量
+    # mask = torch.randint(0, 2, X.shape, dtype=torch.float32, device=X.device)
+     # 设定缺失概率
+    missing_prob = 0.8
+
+    # 生成与 X 大小相同的二值掩码（mask）张量
+    mask = torch.bernoulli(torch.full(X.shape, 1 - missing_prob)).to(X.device)
+
+
+    # # 保存图像到文件
+    # plt.imsave('image_completion_test_mask.png', mask_np)
  
     # Decompose X into tensor train format
     ranks = [5, 5, 5]  # Rank for each factor tensor
     ranks = ranks + [ranks[0]]  # 最后一个 rank 应该等于第一个 rank
     # tr_cores = tr.tr_decompose(X, ranks, max_iter=1, tol=1e-10, device="cuda")
     shape = list(X.shape)
-    tr_cores = tr.initialize_tr_cores(shape, ranks, device="cuda")
+    tr_cores = tr.initialize_tr_cores(shape, ranks, device=my_device)
 
     # Set input parameter 
-    epsilon = (0.1)**2 # Frobenius norm constraint for perturbation tensor
+    epsilon = (50)**2 # Frobenius norm constraint for perturbation tensor
     logging.info(f"Norm2 (epsilon): {epsilon}")
     inner_tol = 1e-10 # Tolerance for inner optimization
     lr = 0.01  # Learning rate for gradient descent
@@ -533,16 +546,17 @@ if __name__ == "__main__":
     logging.info(f"outer_dis_num (Display loss every outer_dis_num steps): {outer_dis_num}")
     logging.info(f"inner_dis_num (Display loss every inner_dis_num steps): {inner_dis_num}")
 
-    config = OptimizationConfig(epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol)
+    config = OptimizationConfig(epsilon, lr, outer_num_steps, inner_num_steps, outer_dis_num, inner_dis_num, inner_tol, my_device)
 
     # Optimize perturbation \mathcal{E}
     X.requires_grad_(True)
-    # E_optimized, TN_G, loss_ours = optimize_perturbation(X, tr_cores, config)
-    # # E_optimized, TN_G, loss_ours = optimize_perturbation_simplified_2(X, tr_cores, config)
-    # # E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
+    E_optimized, TN_G, loss_ours = optimize_perturbation(X, mask, tr_cores, config)
+    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplified_2(X, tr_cores, config)
+    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
+    X_mask_ours = (X+E_optimized) * mask
 
-    # # 计算 norm2
-    # norm2_our_algorithm = torch.norm(X - TN_G).item()
+    # 计算 norm2
+    norm2_our_algorithm = torch.norm(X - TN_G).item()
     
 
     if compare_method_enabled:
@@ -556,18 +570,19 @@ if __name__ == "__main__":
         TN_G_comparison = (TN_G_comparison).cpu().detach().numpy()
         
 
-    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps*outer_num_steps, tol=inner_tol, device="cuda")
-    TN_G_ori = tl.tr_to_tensor(tr_cores) 
+    TN_G_ori, tr_cores = tr.tensor_completion(X, mask, tr_cores, max_iter=inner_num_steps*outer_num_steps, tol=inner_tol, dis_num=inner_dis_num, device="cuda")
+    # TN_G_ori = tl.tr_to_tensor(tr_cores) 
     norm2_original_TR_algorithm = torch.norm(X - TN_G_ori).item()
+    X_mask_ori = X * mask
 
 
     print(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
     logging.info(f"Norm2 (Original TR Algorithm): {norm2_original_TR_algorithm}")
 
-    # # 打印 norm2 结果
-    # print(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
-    # # 记录 norm2 结果到日志
-    # logging.info(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
+    # 打印 norm2 结果
+    print(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
+    # 记录 norm2 结果到日志
+    logging.info(f"Norm2 (Our Algorithm): {norm2_our_algorithm}")
 
 
     if imshow_enabled:
@@ -577,6 +592,8 @@ if __name__ == "__main__":
         X_E_cpu = (X + E_optimized).cpu().detach().numpy()
         TN_G = (TN_G).cpu().detach().numpy()
         TN_G_ori = TN_G_ori.cpu().detach().numpy()
+        X_mask_ori = X_mask_ori.cpu().detach().numpy()
+        X_mask_ours = X_mask_ours.cpu().detach().numpy()
 
 
         # 创建一个全白的图像
@@ -593,14 +610,14 @@ if __name__ == "__main__":
                 
             images = [
             X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
-            white_image, E_cpu, X_E_cpu, TN_G,      # 第二行
-            white_image, E_comparison_cpu, X_E_comparison_cpu, TN_G_comparison  # 第三行
+            X_cpu, E_cpu, X_E_cpu, TN_G,      # 第二行
+            X_cpu, E_comparison_cpu, X_E_comparison_cpu, TN_G_comparison  # 第三行
             ]   
 
             titles = [
                 'Original Image', 'Empty Noise', 'Original Image', 'TR Reconstructed Image',  # 第一行
-                '  ', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
-                '  ', 'ATR Adversarial Noise', 'ATR Adversarial Noisy Image', 'ATR Reconstructed Image'  # 第二行
+                'Original Image', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
+                'Original Image', 'ATR Adversarial Noise', 'ATR Adversarial Noisy Image', 'ATR Reconstructed Image'  # 第二行
             ]
         
             display_images(X_cpu, images, titles, 3, 4, save_path=save_path)
@@ -667,16 +684,16 @@ if __name__ == "__main__":
             display_line_graphs(loss_dict, save_path=loss_plot_path)
         else:
             images = [
-            X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
-            white_image, E_cpu, X_E_cpu, TN_G     # 第二行
+            X_cpu, black_image, X_cpu, X_mask_ours, TN_G_ori,  # 第一行
+            X_cpu, E_cpu, X_E_cpu, X_mask_ori, TN_G     # 第二行
             ]   
 
             titles = [
-                'Original Image', 'Empty Noise', 'Original Image', 'TR Reconstructed Image',  # 第一行
-                '  ', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Ours Reconstructed Image',  # 第二行
+                'Original Image', 'Empty Noise', 'Original Image', 'Mask * X_tube','TR Reconstructed Image',  # 第一行
+                'Original Image', 'Ours Adversarial Noise', 'OursAdversarial Noisy Image', 'Maks * X_tube','Ours Reconstructed Image',  # 第二行
             ]
         
-            display_images(X_cpu, images, titles, 2, 4, save_path=save_path)
+            display_images(X_cpu, images, titles, 2, 5, save_path=save_path)
 
             plt.figure(figsize=(10, 5))
             plt.plot(loss_ours, label='Ours')
