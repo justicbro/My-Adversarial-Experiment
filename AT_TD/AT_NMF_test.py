@@ -14,7 +14,7 @@ import NMF_func as mynmf
 
 
 # 定义一个布尔变量来控制日志记录
-log_enabled = True
+log_enabled = False
 imshow_enabled = True
 compare_method_enabled = True
 

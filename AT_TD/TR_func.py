@@ -7,6 +7,7 @@ from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import gc
+import copy
 
 def initialize_tr_cores(shape, ranks, device):
     cores = []
@@ -128,7 +129,7 @@ def generalized_k_unfolding(X, modes, k):
 
     # del permuted_X, unfold_shape
     # gc.collect()
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
     return unfolded_X
 
@@ -235,13 +236,14 @@ def tr_decompose(X, ranks, max_iter=500, tol=1e-10, dis_num = 10, device="cuda")
     
     return cores
 
-def tr_decompose2(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
+def tr_decompose2(X, cores_ori, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     # 确保 X 是一个正确的张量
     # X = tl.tensor(X, requires_grad=True, device=device)
     # print("X + E requires_grad:", X.requires_grad)
 
     shape = list(X.shape)
     prev_loss = float('inf')
+    cores = copy.deepcopy(cores_ori)
     
     for iteration in range(max_iter):
         for n in range(len(shape)):
@@ -288,7 +290,7 @@ def tr_decompose3(X, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"
     return cores
 
 
-def tensor_completion(X, mask, cores, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
+def tensor_completion(X, mask, cores_ori, max_iter=500, tol=1e-10, dis_num = 10, device="cuda"):
     """
     Perform tensor completion using TR-ALS.
     
@@ -307,7 +309,10 @@ def tensor_completion(X, mask, cores, max_iter=500, tol=1e-10, dis_num = 10, dev
     shape = list(X.shape)
     # cores = initialize_tr_cores(shape, ranks, device)
     prev_loss = float('inf')
+    cores = [core.clone().detach() for core in cores_ori]
+    X_Core = tl.tr_to_tensor(cores)
     X = X*mask
+    X[mask == 0] = X_Core[mask == 0]
     X_real = X.clone().detach()
     
     for iteration in range(max_iter):

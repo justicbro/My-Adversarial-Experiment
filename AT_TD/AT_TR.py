@@ -13,7 +13,7 @@ import math
 
 
 # 指定使用第 0 张 GPU 卡
-os.environ["CUDA_VISIBLE_DEVICES"] = "9"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # 在代码中设置环境变量
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -28,7 +28,7 @@ else:
 # 定义一个布尔变量来控制日志记录
 log_enabled = False
 imshow_enabled = True
-compare_method_enabled = False
+compare_method_enabled = True
 
 # 创建日志文件夹
 if log_enabled:
@@ -106,8 +106,8 @@ def objective_function_ATTR(X, G_list, E, iner_num_steps = 100, inner_tol = 1e-1
     tr_cores = tr.tr_decompose2(X_tube, G_list, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device="cuda")
     # tr_cores = tr.tr_decompose(X_tube, ranks, max_iter=iner_num_steps, tol=inner_tol, dis_num = 2000, device="cuda")
 
-    del X_tube
-    torch.cuda.empty_cache()
+    # del X_tube
+    # torch.cuda.empty_cache()
 
     # 确保 tr_cores 启用了梯度追踪
     for core in tr_cores:
@@ -130,7 +130,7 @@ def objective_function_ATR(X, G_list, E, inner_num_steps, inner_tol):
     inner_num_steps: Number of inner optimization steps
     inner_tol: Tolerance for inner optimization
     """
-    optimizer = torch.optim.Adam([E], lr=config.lr)
+    # optimizer = torch.optim.Adam([E], lr=config.lr)
 
     # Example: Use a different decomposition method or a different loss function
     EC = E.clone().detach()
@@ -345,7 +345,7 @@ def optimize_perturbation_simplifed(X, G_list, config: OptimizationConfig):
 
     return E, TN_G, loss_list
 
-def optimize_perturbation(X, G_list, config: OptimizationConfig):
+def optimize_perturbation(X, G_list_ori, config: OptimizationConfig):
     """
     Optimize perturbation tensor \mathcal{E} using gradient descent.
     X: Original tensor (PyTorch tensor)
@@ -370,9 +370,11 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
         optimizer.zero_grad() # Clear gradients
 
         E_old = E.clone().detach()
+
+        X.requires_grad_(True)
             
         # Compute loss
-        loss, TN_G, G_list = objective_function_ATTR(X, G_list, E, config.inner_num_steps, config.inner_tol)
+        loss, TN_G, G_list = objective_function_ATTR(X, G_list_ori, E, config.inner_num_steps, config.inner_tol)
 
         # print(f"TN_G max: {TN_G.max()}, min: {TN_G.min()}")
 
@@ -383,14 +385,14 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
         # grads = torch.autograd.grad(loss, E, retain_graph=True, allow_unused=True)
         # print(f"Gradient of E: {grads}")
 
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_([E], max_norm=0.1)
+        # # 梯度裁剪
+        # torch.nn.utils.clip_grad_norm_([E], max_norm=0.1)
 
         # 在反向传播之前检查 E 的梯度
         if E.grad is not None:
             print("反向传播之前的梯度：", E.grad)
         # Backpropagation
-        loss.backward(retain_graph=True)
+        loss.backward()
         # print(loss.requires_grad)  # 确保损失函数需要梯度
 
         # 检查梯度
@@ -404,9 +406,9 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
 
         # print(f"E max: {E.max()}, min: {E.min()}")
 
-        E_plus_X = X + E
-        E_plus_X_clamp = torch.clamp(E_plus_X, 0, 1)
-        E.data = E_plus_X_clamp - X
+        # E_plus_X = X + E
+        # E_plus_X_clamp = torch.clamp(E_plus_X, 0, 1)
+        # E.data = E_plus_X_clamp - X
 
         # Apply the constraint ||E||_F^2 <= epsilon
         scaling_factor = (config.epsilon ** 0.5) / torch.norm(E)
@@ -433,14 +435,12 @@ def optimize_perturbation(X, G_list, config: OptimizationConfig):
         if step % config.outer_dis_num == 0:
             print(f"Step {step}, RSE_E: {rse_E}, Loss: {loss_X_TNG}, normE: {norm_E}")
 
-        TN_G2 = TN_G.clone().detach()
+        # TN_G2 = TN_G.clone().detach()
 
-        # 释放计算图
-        del loss, TN_G
-        torch.cuda.empty_cache()
+        
             
 
-    return E, TN_G2, loss_list
+    return E, TN_G, loss_list
 
 def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
     """
@@ -451,6 +451,8 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
     """
     # Initialize perturbation tensor \mathcal{E}
     E = torch.randn_like(X, requires_grad=True, device='cuda')
+    X = X.detach()
+    G_list = [G.detach() for G in G_list]
     # Apply the constraint ||E||_F^2 <= epsilon
     scaling_factor = (config.epsilon ** 0.5) / torch.norm(E)
     if torch.norm(E)**2 > config.epsilon:
@@ -463,13 +465,15 @@ def optimize_perturbation_comparison(X, G_list, config: OptimizationConfig):
     for step in range(config.outer_num_steps):
         optimizer.zero_grad()
 
+        X.requires_grad_(True)
+
         # Compute loss
-        loss, TN_G = objective_function_ATR(X, G_list, E, config.inner_num_steps, config.inner_tol)
+        loss2, TN_G = objective_function_ATR(X, G_list, E, config.inner_num_steps, config.inner_tol)
 
         E_old = E.clone().detach()
 
         # Backpropagation
-        loss.backward()
+        loss2.backward()
 
         # # 检查梯度
         # print("梯度在反向传播后的值：", E.grad)
@@ -514,14 +518,15 @@ if __name__ == "__main__":
     # tr_cores = tr.tr_decompose(X, ranks, max_iter=1, tol=1e-10, device="cuda")
     shape = list(X.shape)
     tr_cores = tr.initialize_tr_cores(shape, ranks, device="cuda")
+    tr_cores = [tr_core.requires_grad_(True) for tr_core in tr_cores]
 
     # Set input parameter 
-    epsilon = (0.1)**2 # Frobenius norm constraint for perturbation tensor
+    epsilon = (50)**2 # Frobenius norm constraint for perturbation tensor
     logging.info(f"Norm2 (epsilon): {epsilon}")
     inner_tol = 1e-10 # Tolerance for inner optimization
     lr = 0.01  # Learning rate for gradient descent
-    outer_num_steps = 50 # Number of outer optimization steps
-    inner_num_steps = 500 # Number of inner optimization steps
+    outer_num_steps = 10 # Number of outer optimization steps
+    inner_num_steps = 50 # Number of inner optimization steps
     outer_dis_num = 1 # Display loss every outer_dis_num steps
     inner_dis_num = 2000 # Display loss every inner_dis_num steps
     logging.info(f"Optimization parameters:")
@@ -537,12 +542,12 @@ if __name__ == "__main__":
 
     # Optimize perturbation \mathcal{E}
     X.requires_grad_(True)
-    # E_optimized, TN_G, loss_ours = optimize_perturbation(X, tr_cores, config)
-    # # E_optimized, TN_G, loss_ours = optimize_perturbation_simplified_2(X, tr_cores, config)
-    # # E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
+    E_optimized, TN_G, loss_ours = optimize_perturbation(X, tr_cores, config)
+    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplified_2(X, tr_cores, config)
+    # E_optimized, TN_G, loss_ours = optimize_perturbation_simplifed(X, tr_cores, config)
 
-    # # 计算 norm2
-    # norm2_our_algorithm = torch.norm(X - TN_G).item()
+    # 计算 norm2
+    norm2_our_algorithm = torch.norm(X - TN_G).item()
     
 
     if compare_method_enabled:
@@ -556,7 +561,7 @@ if __name__ == "__main__":
         TN_G_comparison = (TN_G_comparison).cpu().detach().numpy()
         
 
-    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps*outer_num_steps, tol=inner_tol, device="cuda")
+    tr_cores = tr.tr_decompose(X, ranks, max_iter=inner_num_steps, tol=inner_tol, device="cuda")
     TN_G_ori = tl.tr_to_tensor(tr_cores) 
     norm2_original_TR_algorithm = torch.norm(X - TN_G_ori).item()
 
@@ -578,6 +583,21 @@ if __name__ == "__main__":
         TN_G = (TN_G).cpu().detach().numpy()
         TN_G_ori = TN_G_ori.cpu().detach().numpy()
 
+        # 显示 TN_G 图像
+        plt.imshow(TN_G)
+        # plt.title('TN_G_Ours')
+        plt.axis('off')
+
+        # 保存图像
+        plt.savefig('TN_G_Ours_output.png', bbox_inches='tight', pad_inches=0)
+
+        # 显示 TN_G 图像
+        plt.imshow(TN_G_ori)
+        # plt.title('TN_G_ori_output')
+        plt.axis('off')
+
+        # 保存图像
+        plt.savefig('TN_G_ori_output.png', bbox_inches='tight', pad_inches=0)
 
         # 创建一个全白的图像
         white_image = np.ones_like(X_cpu)
@@ -590,6 +610,14 @@ if __name__ == "__main__":
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         save_path = f'result/lena_comparison_{current_time}.png'
         if compare_method_enabled:
+            
+            # 显示 TN_G 图像
+            plt.imshow(TN_G_comparison)
+            # plt.title('TN_G_comp_output')
+            plt.axis('off')
+
+            # 保存图像
+            plt.savefig('TN_G_comp_output.png', bbox_inches='tight', pad_inches=0)
                 
             images = [
             X_cpu, black_image, X_cpu, TN_G_ori,  # 第一行
